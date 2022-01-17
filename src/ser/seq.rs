@@ -2,18 +2,18 @@ use serde::ser;
 
 use crate::ser::{Error, Result, Serializer};
 
-pub struct SerializeSeq<'a, 'b> {
-    de: &'a mut Serializer<'b>,
+pub struct SerializeSeq<'a, 'b, F> {
+    de: &'a mut Serializer<'b, F>,
     first: bool,
 }
 
-impl<'a, 'b: 'a> SerializeSeq<'a, 'b> {
-    pub(crate) fn new(de: &'a mut Serializer<'b>) -> Self {
+impl<'a, 'b: 'a, F> SerializeSeq<'a, 'b, F> {
+    pub(crate) fn new(de: &'a mut Serializer<'b, F>) -> Self {
         SerializeSeq { de, first: true }
     }
 }
 
-impl<'a, 'b: 'a> ser::SerializeSeq for SerializeSeq<'a, 'b> {
+impl<'a, 'b: 'a, F> ser::SerializeSeq for SerializeSeq<'a, 'b, F> {
     type Ok = ();
     type Error = Error;
 
@@ -36,7 +36,7 @@ impl<'a, 'b: 'a> ser::SerializeSeq for SerializeSeq<'a, 'b> {
     }
 }
 
-impl<'a, 'b: 'a> ser::SerializeTuple for SerializeSeq<'a, 'b> {
+impl<'a, 'b: 'a, F> ser::SerializeTuple for SerializeSeq<'a, 'b, F> {
     type Ok = ();
     type Error = Error;
 

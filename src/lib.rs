@@ -65,9 +65,9 @@ pub mod ser;
 #[doc(inline)]
 pub use self::de::{from_slice, from_str};
 #[doc(inline)]
-pub use self::ser::to_slice;
+pub use self::ser::{to_slice, to_slice_pretty};
 #[cfg(feature = "heapless")]
-pub use self::ser::{to_string, to_vec, to_string_pretty};
+pub use self::ser::{to_string, to_vec, to_vec_pretty, to_string_pretty};
 
 #[cfg(feature = "heapless")]
 pub use heapless;

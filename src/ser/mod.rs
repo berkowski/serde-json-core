@@ -1575,17 +1575,7 @@ pub fn to_string_pretty<T, const N: usize>(value: &T, indent: &[u8]) -> Result<S
     where
         T: ser::Serialize + ?Sized,
 {
-
-    let mut buf = Vec::<u8, N>::new();
-    buf.resize_default(N)?;
-
-    let mut ser = Serializer::with_formatter(&mut buf, PrettyFormatter::with_indent(indent));
-    value.serialize(&mut ser)?;
-
-    let len = ser.into_inner().len();
-    buf.truncate(len);
-
-    Ok(unsafe { str::from_utf8_unchecked(&buf) }.into())
+    Ok(unsafe { str::from_utf8_unchecked(&to_vec_pretty::<T, N>(value, indent)?) }.into())
 }
 
 /// Serializes the given data structure as a JSON byte vector
@@ -1601,12 +1591,36 @@ where
     Ok(buf)
 }
 
+/// Serializes the given data structure as a JSON byte vector in a more human readable format
+#[cfg(feature = "heapless")]
+pub fn to_vec_pretty<T, const N: usize>(value: &T, indent: &[u8]) -> Result<Vec<u8, N>>
+    where
+        T: ser::Serialize + ?Sized,
+{
+    let mut buf = Vec::<u8, N>::new();
+    buf.resize_default(N)?;
+    let len = to_slice_pretty(value, indent, &mut buf)?;
+    buf.truncate(len);
+    Ok(buf)
+}
+
 /// Serializes the given data structure as a JSON byte vector into the provided buffer
 pub fn to_slice<T>(value: &T, buf: &mut [u8]) -> Result<usize>
 where
     T: ser::Serialize + ?Sized,
 {
     let mut ser = Serializer::with_formatter(buf, CompactFormatter);
+    value.serialize(&mut ser)?;
+    let buf = ser.into_inner();
+    Ok(buf.len())
+}
+
+/// Serializes the given data structure as a JSON byte vector in a more human-readable format into the provided buffer
+pub fn to_slice_pretty<T>(value: &T, indent: &[u8], buf: &mut [u8]) -> Result<usize>
+    where
+        T: ser::Serialize + ?Sized,
+{
+    let mut ser = Serializer::with_formatter(buf, PrettyFormatter::with_indent(indent));
     value.serialize(&mut ser)?;
     let buf = ser.into_inner();
     Ok(buf.len())

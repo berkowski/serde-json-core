@@ -1578,6 +1578,17 @@ pub fn to_string_pretty<T, const N: usize>(value: &T, indent: &[u8]) -> Result<S
     Ok(unsafe { str::from_utf8_unchecked(&to_vec_pretty::<T, N>(value, indent)?) }.into())
 }
 
+/// Serializes the given data structure as a string of JSON text with the provided formatter
+#[cfg(feature = "heapless")]
+pub fn to_string_with_format<T, F, const N: usize>(value: &T, formatter: F) -> Result<String<N>>
+    where
+        T: ser::Serialize + ?Sized,
+        F: Formatter,
+{
+    Ok(unsafe { str::from_utf8_unchecked(&to_vec_with_format::<T, F, N>(value, formatter)?) }.into())
+}
+
+
 /// Serializes the given data structure as a JSON byte vector
 #[cfg(feature = "heapless")]
 pub fn to_vec<T, const N: usize>(value: &T) -> Result<Vec<u8, N>>
@@ -1604,6 +1615,20 @@ pub fn to_vec_pretty<T, const N: usize>(value: &T, indent: &[u8]) -> Result<Vec<
     Ok(buf)
 }
 
+/// Serializes the given data structure as a JSON byte vector with the provided formatter
+#[cfg(feature = "heapless")]
+pub fn to_vec_with_format<T, F, const N: usize>(value: &T, formatter: F) -> Result<Vec<u8, N>>
+    where
+        T: ser::Serialize + ?Sized,
+        F: Formatter,
+{
+    let mut buf = Vec::<u8, N>::new();
+    buf.resize_default(N)?;
+    let len = to_slice_with_format(value, formatter, &mut buf)?;
+    buf.truncate(len);
+    Ok(buf)
+}
+
 /// Serializes the given data structure as a JSON byte vector into the provided buffer
 pub fn to_slice<T>(value: &T, buf: &mut [u8]) -> Result<usize>
 where
@@ -1621,6 +1646,18 @@ pub fn to_slice_pretty<T>(value: &T, indent: &[u8], buf: &mut [u8]) -> Result<us
         T: ser::Serialize + ?Sized,
 {
     let mut ser = Serializer::with_formatter(buf, PrettyFormatter::with_indent(indent));
+    value.serialize(&mut ser)?;
+    let buf = ser.into_inner();
+    Ok(buf.len())
+}
+
+/// Serializes the given data structure as a JSON byte vector into the provided buffer and format
+pub fn to_slice_with_format<T, F>(value: &T, formatter: F, buf: &mut [u8]) -> Result<usize>
+    where
+        T: ser::Serialize + ?Sized,
+        F: Formatter,
+{
+    let mut ser = Serializer::with_formatter(buf, formatter);
     value.serialize(&mut ser)?;
     let buf = ser.into_inner();
     Ok(buf.len())

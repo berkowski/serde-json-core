@@ -29,3 +29,4 @@ serde_derive = "1.0.80"
 default = ["heapless"]
 custom-error-messages = ["heapless"]
 std = ["serde/std"]
+pretty-print = []

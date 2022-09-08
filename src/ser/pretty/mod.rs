@@ -1,72 +1,36 @@
-//! Serialize a Rust data structure into JSON data
-
-use core::{fmt, str};
-
+//! Serialize a Rust data structure into pretty-printed JSON data
 use serde::ser;
 use serde::ser::SerializeStruct as _;
 
-#[cfg(feature = "heapless")]
-use heapless::{String, Vec};
+use core::{fmt, str};
 
 use self::map::SerializeMap;
 use self::seq::SerializeSeq;
 use self::struct_::{SerializeStruct, SerializeStructVariant};
 
-#[macro_use]
-mod macros;
+#[cfg(feature = "heapless")]
+use heapless::{String, Vec};
+
+use crate::ser::{Error, Result, hex};
 
 mod map;
 mod seq;
 mod struct_;
-#[cfg(feature="pretty-print")]
-pub mod pretty;
 
-/// Serialization result
-pub type Result<T> = ::core::result::Result<T, Error>;
-
-/// This type represents all possible errors that can occur when serializing JSON data
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum Error {
-    /// Buffer is full
-    BufferFull,
-}
-
-impl From<()> for Error {
-    fn from(_: ()) -> Error {
-        Error::BufferFull
-    }
-}
-
-impl From<u8> for Error {
-    fn from(_: u8) -> Error {
-        Error::BufferFull
-    }
-}
-
-#[cfg(feature = "std")]
-impl ::std::error::Error for Error {
-    fn description(&self) -> &str {
-        ""
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Buffer is full")
-    }
-}
-
-pub(crate) struct Serializer<'a> {
-    buf: &'a mut [u8],
+pub(crate) struct Serializer<'buffer, 'indent> {
+    buf: &'buffer mut [u8],
     current_length: usize,
+    current_indent: usize,
+    indent: &'indent [u8],
 }
 
-impl<'a> Serializer<'a> {
-    fn new(buf: &'a mut [u8]) -> Self {
+impl<'buffer, 'indent> Serializer<'buffer, 'indent> {
+    fn new(buf: &'buffer mut [u8], indent: &'indent [u8]) -> Self {
         Serializer {
             buf,
             current_length: 0,
+            current_indent: 0,
+            indent,
         }
     }
 
@@ -95,32 +59,25 @@ impl<'a> Serializer<'a> {
             Ok(())
         }
     }
-}
 
-/// Upper-case hex for value in 0..16, encoded as ASCII bytes
-pub(crate) fn hex_4bit(c: u8) -> u8 {
-    if c <= 9 {
-        0x30 + c
-    } else {
-        0x41 + (c - 10)
+    pub fn indent(&mut self) -> Result<()> {
+        for _ in 0..self.current_indent {
+            self.extend_from_slice(self.indent)?;
+        }
+        Ok(())
     }
 }
 
-/// Upper-case hex for value in 0..256, encoded as ASCII bytes
-pub(crate) fn hex(c: u8) -> (u8, u8) {
-    (hex_4bit(c >> 4), hex_4bit(c & 0x0F))
-}
-
-impl<'a, 'b: 'a> ser::Serializer for &'a mut Serializer<'b> {
+impl<'serializer, 'buffer: 'serializer, 'indent: 'serializer> ser::Serializer for &'serializer mut Serializer<'buffer, 'indent> {
     type Ok = ();
     type Error = Error;
-    type SerializeSeq = SerializeSeq<'a, 'b>;
-    type SerializeTuple = SerializeSeq<'a, 'b>;
-    type SerializeTupleStruct = Unreachable;
-    type SerializeTupleVariant = Unreachable;
-    type SerializeMap = SerializeMap<'a, 'b>;
-    type SerializeStruct = SerializeStruct<'a, 'b>;
-    type SerializeStructVariant = SerializeStructVariant<'a, 'b>;
+    type SerializeSeq = SerializeSeq<'serializer, 'buffer, 'indent>;
+    type SerializeTuple = SerializeSeq<'serializer, 'buffer, 'indent>;
+    type SerializeTupleStruct = crate::ser::Unreachable;
+    type SerializeTupleVariant = crate::ser::Unreachable;
+    type SerializeMap = SerializeMap<'serializer, 'buffer, 'indent>;
+    type SerializeStruct = SerializeStruct<'serializer, 'buffer, 'indent>;
+    type SerializeStructVariant = SerializeStructVariant<'serializer, 'buffer, 'indent>;
 
     fn serialize_bool(self, v: bool) -> Result<Self::Ok> {
         if v {
@@ -263,8 +220,8 @@ impl<'a, 'b: 'a> ser::Serializer for &'a mut Serializer<'b> {
     }
 
     fn serialize_some<T: ?Sized>(self, value: &T) -> Result<Self::Ok>
-    where
-        T: ser::Serialize,
+        where
+            T: ser::Serialize,
     {
         value.serialize(self)
     }
@@ -287,8 +244,8 @@ impl<'a, 'b: 'a> ser::Serializer for &'a mut Serializer<'b> {
     }
 
     fn serialize_newtype_struct<T: ?Sized>(self, _name: &'static str, value: &T) -> Result<Self::Ok>
-    where
-        T: ser::Serialize,
+        where
+            T: ser::Serialize,
     {
         value.serialize(self)
     }
@@ -300,9 +257,10 @@ impl<'a, 'b: 'a> ser::Serializer for &'a mut Serializer<'b> {
         variant: &'static str,
         value: &T,
     ) -> Result<Self::Ok>
-    where
-        T: ser::Serialize,
+        where
+            T: ser::Serialize,
     {
+        self.current_indent += 1;
         self.push(b'{')?;
         let mut s = SerializeStruct::new(self);
         s.serialize_field(variant, value)?;
@@ -311,6 +269,7 @@ impl<'a, 'b: 'a> ser::Serializer for &'a mut Serializer<'b> {
     }
 
     fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq> {
+        self.current_indent += 1;
         self.push(b'[')?;
 
         Ok(SerializeSeq::new(self))
@@ -339,12 +298,14 @@ impl<'a, 'b: 'a> ser::Serializer for &'a mut Serializer<'b> {
     }
 
     fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap> {
+        self.current_indent += 1;
         self.push(b'{')?;
 
         Ok(SerializeMap::new(self))
     }
 
     fn serialize_struct(self, _name: &'static str, _len: usize) -> Result<Self::SerializeStruct> {
+        self.current_indent += 1;
         self.push(b'{')?;
 
         Ok(SerializeStruct::new(self))
@@ -357,111 +318,55 @@ impl<'a, 'b: 'a> ser::Serializer for &'a mut Serializer<'b> {
         variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStructVariant> {
-        self.extend_from_slice(b"{\"")?;
+        self.current_indent += 1;
+        self.extend_from_slice(b"{\n")?;
+        self.indent()?;
+        self.push(b'"')?;
         self.extend_from_slice(variant.as_bytes())?;
         self.extend_from_slice(b"\":{")?;
+        self.current_indent += 1;
 
         Ok(SerializeStructVariant::new(self))
     }
 
     fn collect_str<T: ?Sized>(self, _value: &T) -> Result<Self::Ok>
-    where
-        T: fmt::Display,
+        where
+            T: fmt::Display,
     {
         unreachable!()
     }
 }
 
-/// Serializes the given data structure as a string of JSON text
+/// Serializes the given data structure as a pretty-printed string of JSON text
 #[cfg(feature = "heapless")]
-pub fn to_string<T, const N: usize>(value: &T) -> Result<String<N>>
-where
-    T: ser::Serialize + ?Sized,
+pub fn to_string_pretty<T, const N: usize>(value: &T, indent: &[u8]) -> Result<String<N>>
+    where
+        T: ser::Serialize + ?Sized,
 {
-    Ok(unsafe { str::from_utf8_unchecked(&to_vec::<T, N>(value)?) }.into())
+    Ok(unsafe { str::from_utf8_unchecked(&to_vec_pretty::<T, N>(value, indent)?) }.into())
 }
 
-/// Serializes the given data structure as a JSON byte vector
+/// Serializes the given data structure as a pretty-printed JSON byte vector
 #[cfg(feature = "heapless")]
-pub fn to_vec<T, const N: usize>(value: &T) -> Result<Vec<u8, N>>
-where
-    T: ser::Serialize + ?Sized,
+pub fn to_vec_pretty<T, const N: usize>(value: &T, indent: &[u8]) -> Result<Vec<u8, N>>
+    where
+        T: ser::Serialize + ?Sized,
 {
     let mut buf = Vec::<u8, N>::new();
     buf.resize_default(N)?;
-    let len = to_slice(value, &mut buf)?;
+    let len = to_slice_pretty(value, &mut buf, indent)?;
     buf.truncate(len);
     Ok(buf)
 }
 
-/// Serializes the given data structure as a JSON byte vector into the provided buffer
-pub fn to_slice<T>(value: &T, buf: &mut [u8]) -> Result<usize>
-where
-    T: ser::Serialize + ?Sized,
+/// Serializes the given data structure as a pretty-printed JSON byte vector into the provided buffer
+pub fn to_slice_pretty<T>(value: &T, buf: &mut [u8], indent: &[u8]) -> Result<usize>
+    where
+        T: ser::Serialize + ?Sized,
 {
-    let mut ser = Serializer::new(buf);
+    let mut ser = Serializer::new(buf, indent);
     value.serialize(&mut ser)?;
     Ok(ser.current_length)
-}
-
-impl ser::Error for Error {
-    fn custom<T>(_msg: T) -> Self
-    where
-        T: fmt::Display,
-    {
-        unreachable!()
-    }
-}
-
-pub(crate) enum Unreachable {}
-
-impl ser::SerializeTupleStruct for Unreachable {
-    type Ok = ();
-    type Error = Error;
-
-    fn serialize_field<T: ?Sized>(&mut self, _value: &T) -> Result<()> {
-        unreachable!()
-    }
-
-    fn end(self) -> Result<Self::Ok> {
-        unreachable!()
-    }
-}
-
-impl ser::SerializeTupleVariant for Unreachable {
-    type Ok = ();
-    type Error = Error;
-
-    fn serialize_field<T: ?Sized>(&mut self, _value: &T) -> Result<()> {
-        unreachable!()
-    }
-
-    fn end(self) -> Result<Self::Ok> {
-        unreachable!()
-    }
-}
-
-impl ser::SerializeMap for Unreachable {
-    type Ok = ();
-    type Error = Error;
-
-    fn serialize_key<T: ?Sized>(&mut self, _key: &T) -> Result<()>
-    where
-        T: ser::Serialize,
-    {
-        unreachable!()
-    }
-
-    fn serialize_value<T: ?Sized>(&mut self, _value: &T) -> Result<()>
-    where
-        T: ser::Serialize,
-    {
-        unreachable!()
-    }
-
-    fn end(self) -> Result<Self::Ok> {
-        unreachable!()
-    }
 }
 
 #[cfg(test)]
@@ -469,24 +374,19 @@ mod tests {
     use serde_derive::Serialize;
 
     const N: usize = 128;
+    const INDENT: &[u8] = b"  ";
 
     #[test]
     fn array() {
         let buf = &mut [0u8; 128];
-        let len = crate::to_slice(&[0, 1, 2], buf).unwrap();
-        assert_eq!(len, 7);
-        assert_eq!(&buf[..len], b"[0,1,2]");
-        assert_eq!(&*crate::to_string::<_, N>(&[0, 1, 2]).unwrap(), "[0,1,2]");
-    }
-
-    #[test]
-    fn bool() {
-        let buf = &mut [0u8; 128];
-        let len = crate::to_slice(&true, buf).unwrap();
-        assert_eq!(len, 4);
-        assert_eq!(&buf[..len], b"true");
-
-        assert_eq!(&*crate::to_string::<_, N>(&true).unwrap(), "true");
+        let len = crate::to_slice_pretty(&[0, 1, 2], buf, INDENT).unwrap();
+        let expected =r#"[
+  0,
+  1,
+  2
+]"#;
+        assert_eq!(&buf[..len], expected.as_bytes());
+        assert_eq!(&*crate::to_string_pretty::<_, N>(&[0, 1, 2], INDENT).unwrap(), expected);
     }
 
     #[test]
@@ -500,83 +400,83 @@ mod tests {
         }
 
         assert_eq!(
-            &*crate::to_string::<_, N>(&Type::Boolean).unwrap(),
+            &*crate::to_string_pretty::<_, N>(&Type::Boolean, INDENT).unwrap(),
             r#""boolean""#
         );
 
         assert_eq!(
-            &*crate::to_string::<_, N>(&Type::Number).unwrap(),
+            &*crate::to_string_pretty::<_, N>(&Type::Number, INDENT).unwrap(),
             r#""number""#
         );
     }
 
     #[test]
     fn str() {
-        assert_eq!(&*crate::to_string::<_, N>("hello").unwrap(), r#""hello""#);
-        assert_eq!(&*crate::to_string::<_, N>("").unwrap(), r#""""#);
+        assert_eq!(&*crate::to_string_pretty::<_, N>("hello", INDENT).unwrap(), r#""hello""#);
+        assert_eq!(&*crate::to_string_pretty::<_, N>("", INDENT).unwrap(), r#""""#);
 
         // Characters unescaped if possible
-        assert_eq!(&*crate::to_string::<_, N>("ä").unwrap(), r#""ä""#);
-        assert_eq!(&*crate::to_string::<_, N>("৬").unwrap(), r#""৬""#);
-        // assert_eq!(&*crate::to_string::<_, N>("\u{A0}").unwrap(), r#"" ""#); // non-breaking space
-        assert_eq!(&*crate::to_string::<_, N>("ℝ").unwrap(), r#""ℝ""#); // 3 byte character
-        assert_eq!(&*crate::to_string::<_, N>("💣").unwrap(), r#""💣""#); // 4 byte character
+        assert_eq!(&*crate::to_string_pretty::<_, N>("ä", INDENT).unwrap(), r#""ä""#);
+        assert_eq!(&*crate::to_string_pretty::<_, N>("৬", INDENT).unwrap(), r#""৬""#);
+        // assert_eq!(&*crate::to_string_pretty::<_, N>("\u{A0}").unwrap(), r#"" ""#); // non-breaking space
+        assert_eq!(&*crate::to_string_pretty::<_, N>("ℝ", INDENT).unwrap(), r#""ℝ""#); // 3 byte character
+        assert_eq!(&*crate::to_string_pretty::<_, N>("💣", INDENT).unwrap(), r#""💣""#); // 4 byte character
 
         // " and \ must be escaped
         assert_eq!(
-            &*crate::to_string::<_, N>("foo\"bar").unwrap(),
+            &*crate::to_string_pretty::<_, N>("foo\"bar", INDENT).unwrap(),
             r#""foo\"bar""#
         );
         assert_eq!(
-            &*crate::to_string::<_, N>("foo\\bar").unwrap(),
+            &*crate::to_string_pretty::<_, N>("foo\\bar", INDENT).unwrap(),
             r#""foo\\bar""#
         );
 
         // \b, \t, \n, \f, \r must be escaped in their two-character escaping
         assert_eq!(
-            &*crate::to_string::<_, N>(" \u{0008} ").unwrap(),
+            &*crate::to_string_pretty::<_, N>(" \u{0008} ", INDENT).unwrap(),
             r#"" \b ""#
         );
         assert_eq!(
-            &*crate::to_string::<_, N>(" \u{0009} ").unwrap(),
+            &*crate::to_string_pretty::<_, N>(" \u{0009} ", INDENT).unwrap(),
             r#"" \t ""#
         );
         assert_eq!(
-            &*crate::to_string::<_, N>(" \u{000A} ").unwrap(),
+            &*crate::to_string_pretty::<_, N>(" \u{000A} ", INDENT).unwrap(),
             r#"" \n ""#
         );
         assert_eq!(
-            &*crate::to_string::<_, N>(" \u{000C} ").unwrap(),
+            &*crate::to_string_pretty::<_, N>(" \u{000C} ", INDENT).unwrap(),
             r#"" \f ""#
         );
         assert_eq!(
-            &*crate::to_string::<_, N>(" \u{000D} ").unwrap(),
+            &*crate::to_string_pretty::<_, N>(" \u{000D} ", INDENT).unwrap(),
             r#"" \r ""#
         );
 
         // U+0000 through U+001F is escaped using six-character \u00xx uppercase hexadecimal escape sequences
         assert_eq!(
-            &*crate::to_string::<_, N>(" \u{0000} ").unwrap(),
+            &*crate::to_string_pretty::<_, N>(" \u{0000} ", INDENT).unwrap(),
             r#"" \u0000 ""#
         );
         assert_eq!(
-            &*crate::to_string::<_, N>(" \u{0001} ").unwrap(),
+            &*crate::to_string_pretty::<_, N>(" \u{0001} ", INDENT).unwrap(),
             r#"" \u0001 ""#
         );
         assert_eq!(
-            &*crate::to_string::<_, N>(" \u{0007} ").unwrap(),
+            &*crate::to_string_pretty::<_, N>(" \u{0007} ", INDENT).unwrap(),
             r#"" \u0007 ""#
         );
         assert_eq!(
-            &*crate::to_string::<_, N>(" \u{000e} ").unwrap(),
+            &*crate::to_string_pretty::<_, N>(" \u{000e} ", INDENT).unwrap(),
             r#"" \u000E ""#
         );
         assert_eq!(
-            &*crate::to_string::<_, N>(" \u{001D} ").unwrap(),
+            &*crate::to_string_pretty::<_, N>(" \u{001D} ", INDENT).unwrap(),
             r#"" \u001D ""#
         );
         assert_eq!(
-            &*crate::to_string::<_, N>(" \u{001f} ").unwrap(),
+            &*crate::to_string_pretty::<_, N>(" \u{001f} ", INDENT).unwrap(),
             r#"" \u001F ""#
         );
     }
@@ -589,8 +489,10 @@ mod tests {
         }
 
         assert_eq!(
-            &*crate::to_string::<_, N>(&Led { led: true }).unwrap(),
-            r#"{"led":true}"#
+            &*crate::to_string_pretty::<_, N>(&Led { led: true }, INDENT).unwrap(),
+            r#"{
+  "led":true
+}"#
         );
     }
 
@@ -602,23 +504,31 @@ mod tests {
         }
 
         assert_eq!(
-            &*crate::to_string::<_, N>(&Temperature { temperature: 127 }).unwrap(),
-            r#"{"temperature":127}"#
+            &*crate::to_string_pretty::<_, N>(&Temperature { temperature: 127 }, INDENT).unwrap(),
+            r#"{
+  "temperature":127
+}"#
         );
 
         assert_eq!(
-            &*crate::to_string::<_, N>(&Temperature { temperature: 20 }).unwrap(),
-            r#"{"temperature":20}"#
+            &*crate::to_string_pretty::<_, N>(&Temperature { temperature: 20 }, INDENT).unwrap(),
+            r#"{
+  "temperature":20
+}"#
         );
 
         assert_eq!(
-            &*crate::to_string::<_, N>(&Temperature { temperature: -17 }).unwrap(),
-            r#"{"temperature":-17}"#
+            &*crate::to_string_pretty::<_, N>(&Temperature { temperature: -17 }, INDENT).unwrap(),
+            r#"{
+  "temperature":-17
+}"#
         );
 
         assert_eq!(
-            &*crate::to_string::<_, N>(&Temperature { temperature: -128 }).unwrap(),
-            r#"{"temperature":-128}"#
+            &*crate::to_string_pretty::<_, N>(&Temperature { temperature: -128 }, INDENT).unwrap(),
+            r#"{
+  "temperature":-128
+}"#
         );
     }
 
@@ -630,40 +540,50 @@ mod tests {
         }
 
         assert_eq!(
-            &*crate::to_string::<_, N>(&Temperature { temperature: -20. }).unwrap(),
-            r#"{"temperature":-20.0}"#
+            &*crate::to_string_pretty::<_, N>(&Temperature { temperature: -20. }, INDENT).unwrap(),
+            r#"{
+  "temperature":-20.0
+}"#
         );
 
         assert_eq!(
-            &*crate::to_string::<_, N>(&Temperature {
+            &*crate::to_string_pretty::<_, N>(&Temperature {
                 temperature: -20345.
-            })
-            .unwrap(),
-            r#"{"temperature":-20345.0}"#
+            }, INDENT)
+                .unwrap(),
+            r#"{
+  "temperature":-20345.0
+}"#
         );
 
         assert_eq!(
-            &*crate::to_string::<_, N>(&Temperature {
+            &*crate::to_string_pretty::<_, N>(&Temperature {
                 temperature: -2.3456789012345e-23
-            })
-            .unwrap(),
-            r#"{"temperature":-2.3456788e-23}"#
+            }, INDENT)
+                .unwrap(),
+            r#"{
+  "temperature":-2.3456788e-23
+}"#
         );
 
         assert_eq!(
-            &*crate::to_string::<_, N>(&Temperature {
+            &*crate::to_string_pretty::<_, N>(&Temperature {
                 temperature: f32::NAN
-            })
-            .unwrap(),
-            r#"{"temperature":null}"#
+            }, INDENT)
+                .unwrap(),
+            r#"{
+  "temperature":null
+}"#
         );
 
         assert_eq!(
-            &*crate::to_string::<_, N>(&Temperature {
+            &*crate::to_string_pretty::<_, N>(&Temperature {
                 temperature: f32::NEG_INFINITY
-            })
-            .unwrap(),
-            r#"{"temperature":null}"#
+            }, INDENT)
+                .unwrap(),
+            r#"{
+  "temperature":null
+}"#
         );
     }
 
@@ -675,17 +595,21 @@ mod tests {
         }
 
         assert_eq!(
-            crate::to_string::<_, N>(&Property {
+            crate::to_string_pretty::<_, N>(&Property {
                 description: Some("An ambient temperature sensor"),
-            })
-            .unwrap(),
-            r#"{"description":"An ambient temperature sensor"}"#
+            }, INDENT)
+                .unwrap(),
+            r#"{
+  "description":"An ambient temperature sensor"
+}"#
         );
 
         // XXX Ideally this should produce "{}"
         assert_eq!(
-            crate::to_string::<_, N>(&Property { description: None }).unwrap(),
-            r#"{"description":null}"#
+            crate::to_string_pretty::<_, N>(&Property { description: None }, INDENT).unwrap(),
+            r#"{
+  "description":null
+}"#
         );
     }
 
@@ -697,8 +621,10 @@ mod tests {
         }
 
         assert_eq!(
-            &*crate::to_string::<_, N>(&Temperature { temperature: 20 }).unwrap(),
-            r#"{"temperature":20}"#
+            &*crate::to_string_pretty::<_, N>(&Temperature { temperature: 20 }, INDENT).unwrap(),
+            r#"{
+  "temperature":20
+}"#
         );
     }
 
@@ -707,7 +633,7 @@ mod tests {
         #[derive(Serialize)]
         struct Empty {}
 
-        assert_eq!(&*crate::to_string::<_, N>(&Empty {}).unwrap(), r#"{}"#);
+        assert_eq!(&*crate::to_string_pretty::<_, N>(&Empty {}, INDENT).unwrap(), r#"{}"#);
 
         #[derive(Serialize)]
         struct Tuple {
@@ -716,15 +642,18 @@ mod tests {
         }
 
         assert_eq!(
-            &*crate::to_string::<_, N>(&Tuple { a: true, b: false }).unwrap(),
-            r#"{"a":true,"b":false}"#
+            &*crate::to_string_pretty::<_, N>(&Tuple { a: true, b: false }, INDENT).unwrap(),
+            r#"{
+  "a":true,
+  "b":false
+}"#
         );
     }
 
     #[test]
     fn test_unit() {
         let a = ();
-        assert_eq!(&*crate::to_string::<_, N>(&a).unwrap(), r#"null"#);
+        assert_eq!(&*crate::to_string_pretty::<_, N>(&a, INDENT).unwrap(), r#"null"#);
     }
 
     #[test]
@@ -732,7 +661,7 @@ mod tests {
         #[derive(Serialize)]
         struct A(pub u32);
         let a = A(54);
-        assert_eq!(&*crate::to_string::<_, N>(&a).unwrap(), r#"54"#);
+        assert_eq!(&*crate::to_string_pretty::<_, N>(&a, INDENT).unwrap(), r#"54"#);
     }
 
     #[test]
@@ -743,7 +672,9 @@ mod tests {
         }
         let a = A::A(54);
 
-        assert_eq!(&*crate::to_string::<_, N>(&a).unwrap(), r#"{"A":54}"#);
+        assert_eq!(&*crate::to_string_pretty::<_, N>(&a, INDENT).unwrap(), r#"{
+  "A":54
+}"#);
     }
 
     #[test]
@@ -755,8 +686,13 @@ mod tests {
         let a = A::A { x: 54, y: 720 };
 
         assert_eq!(
-            &*crate::to_string::<_, N>(&a).unwrap(),
-            r#"{"A":{"x":54,"y":720}}"#
+            &*crate::to_string_pretty::<_, N>(&a, INDENT).unwrap(),
+            r#"{
+  "A":{
+    "x":54,
+    "y":720
+  }
+}"#
         );
     }
 
@@ -769,8 +705,8 @@ mod tests {
 
         impl serde::Serialize for SimpleDecimal {
             fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: serde::Serializer,
+                where
+                    S: serde::Serializer,
             {
                 let mut aux: String<{ N }> = String::new();
                 write!(aux, "{:.2}", self.0).unwrap();
@@ -779,12 +715,12 @@ mod tests {
         }
 
         let sd1 = SimpleDecimal(1.55555);
-        assert_eq!(&*crate::to_string::<_, N>(&sd1).unwrap(), r#"1.56"#);
+        assert_eq!(&*crate::to_string_pretty::<_, N>(&sd1, INDENT).unwrap(), r#"1.56"#);
 
         let sd2 = SimpleDecimal(0.000);
-        assert_eq!(&*crate::to_string::<_, N>(&sd2).unwrap(), r#"0.00"#);
+        assert_eq!(&*crate::to_string_pretty::<_, N>(&sd2, INDENT).unwrap(), r#"0.00"#);
 
         let sd3 = SimpleDecimal(22222.777777);
-        assert_eq!(&*crate::to_string::<_, N>(&sd3).unwrap(), r#"22222.78"#);
+        assert_eq!(&*crate::to_string_pretty::<_, N>(&sd3, INDENT).unwrap(), r#"22222.78"#);
     }
 }
